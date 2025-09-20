@@ -7,7 +7,7 @@ def compute_md5(text):
     """Compute MD5 hash of the given text."""
     return hashlib.md5(text.encode('utf-8')).hexdigest()
 
-def format_task_dates(date_completed, date_due, date_planned, date_to_start):
+def format_task_dates(date_completed, date_due, date_planned, date_to_start, date_added, date_modified):
     """Format task dates using Obsidian Tasks emoji format."""
     from datetime import datetime
 
@@ -28,6 +28,10 @@ def format_task_dates(date_completed, date_due, date_planned, date_to_start):
         date_parts.append(f"⏳ {format_date(date_planned)}")
     if date_to_start:
         date_parts.append(f"🛫 {format_date(date_to_start)}")
+    if date_added:
+        date_parts.append(f"➕ {format_date(date_added)}")
+    if date_modified:
+        date_parts.append(f"✏️ {format_date(date_modified)}")
 
     return f" {' '.join(date_parts)}" if date_parts else ""
 
@@ -64,7 +68,9 @@ def fetch_tasks_with_project_info(database_path):
         t1.dateCompleted AS date_completed,
         t1.dateDue AS date_due,
         t1.datePlanned AS date_planned,
-        t1.dateToStart AS date_to_start
+        t1.dateToStart AS date_to_start,
+        t1.dateAdded AS date_added,
+        t1.dateModified AS date_modified
     FROM
         Task t1
     LEFT JOIN
@@ -201,17 +207,17 @@ def generate_md_content_with_title(tasks, project_id, task_tags, project_status)
 
     if title_task:
         (task_name, task_identifier, task_note, _, _, is_completed, _, is_flagged,
-         date_completed, date_due, date_planned, date_to_start) = title_task
+         date_completed, date_due, date_planned, date_to_start, date_added, date_modified) = title_task
         formatted_note = format_note_as_subitems(task_note)
         # Include completion date for project title if completed
-        dates_str = format_task_dates(date_completed if is_completed else None, date_due, date_planned, date_to_start)
+        dates_str = format_task_dates(date_completed if is_completed else None, date_due, date_planned, date_to_start, date_added, date_modified)
         tags_str = format_task_tags(task_tags.get(task_identifier, []), project_status)
         flag_str = " 🔼" if is_flagged else ""
         content += f"# {task_name}{dates_str}{tags_str}{flag_str}{formatted_note}\n\n"
 
     # Add the rest of the tasks
     for (task_name, task_identifier, task_note, _, _, is_completed, is_dropped, is_flagged,
-         date_completed, date_due, date_planned, date_to_start) in tasks:
+         date_completed, date_due, date_planned, date_to_start, date_added, date_modified) in tasks:
         checkbox = "- [x]" if is_completed else ("- [c]" if is_dropped else "- [ ]")
 
         # Format dates - include completion date only for completed tasks
@@ -219,7 +225,9 @@ def generate_md_content_with_title(tasks, project_id, task_tags, project_status)
             date_completed if is_completed else None,
             date_due,
             date_planned,
-            date_to_start
+            date_to_start,
+            date_added,
+            date_modified
         )
 
         # Format tags
