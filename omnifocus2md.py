@@ -95,14 +95,62 @@ def fetch_task_tags(database_path):
             task_tags[task_id].append(tag_name)
     return dict(task_tags)
 
-def fetch_projects_with_metadata_from_projectinfo(database_path):
-    """Get metadata (name, identifier and status) for projects from the ProjectInfo table."""
+def fetch_folder_hierarchy(database_path):
+    """Fetch folder hierarchy as a dictionary mapping folder_id to folder path."""
     query = """
-    SELECT 
+    SELECT
+        persistentIdentifier,
+        name,
+        parent
+    FROM
+        Folder
+    ORDER BY
+        rank
+    """
+
+    folders = {}
+    folder_paths = {}
+
+    with sqlite3.connect(database_path) as conn:
+        results = conn.execute(query).fetchall()
+
+        # First pass: store all folders
+        for folder_id, name, parent_id in results:
+            folders[folder_id] = {'name': name, 'parent': parent_id}
+
+        # Second pass: build full paths
+        def get_folder_path(folder_id):
+            if folder_id not in folders:
+                return ""
+
+            if folder_id in folder_paths:
+                return folder_paths[folder_id]
+
+            folder = folders[folder_id]
+            if folder['parent']:
+                parent_path = get_folder_path(folder['parent'])
+                path = f"{parent_path}/{folder['name']}" if parent_path else folder['name']
+            else:
+                path = folder['name']
+
+            folder_paths[folder_id] = path
+            return path
+
+        # Build paths for all folders
+        for folder_id in folders:
+            get_folder_path(folder_id)
+
+    return folder_paths
+
+def fetch_projects_with_metadata_from_projectinfo(database_path):
+    """Get metadata (name, identifier, status, and folder) for projects from the ProjectInfo table."""
+    query = """
+    SELECT
         Task.name AS project_name,
         Task.persistentIdentifier AS project_identifier,
-        ProjectInfo.effectiveStatus AS project_status
-    FROM 
+        ProjectInfo.effectiveStatus AS project_status,
+        ProjectInfo.folder AS folder_id
+    FROM
         Task
     JOIN
         ProjectInfo
@@ -112,7 +160,7 @@ def fetch_projects_with_metadata_from_projectinfo(database_path):
     with sqlite3.connect(database_path) as conn:
         results = conn.execute(query).fetchall()
         print(len(results))
-    return {project_id: (project_id, project_name, project_status) for project_name, project_id, project_status in results}
+    return {project_id: (project_id, project_name, project_status, folder_id) for project_name, project_id, project_status, folder_id in results}
 
 def sanitize_filename(filename):
     """Sanitize the filename by removing or replacing special characters."""
@@ -123,7 +171,7 @@ def sanitize_filename(filename):
 
 def generate_md_metadata(project_info):
     """Generate Markdown metadata for a given project."""
-    project_id, project_name, project_status = project_info
+    project_id, project_name, project_status, folder_id = project_info
     if not project_id:
         return f"status: {project_status}\ntags: omnifocus\n"
     return f"status: {project_status}\ntags: omnifocus\n"
@@ -188,33 +236,46 @@ def generate_md_content_with_title(tasks, project_id, task_tags, project_status)
 
     return content
 
-def create_md_files(tasks_with_project_info, project_metadata, task_tags, output_directory):
+def create_md_files(tasks_with_project_info, project_metadata, task_tags, folder_hierarchy, output_directory):
     """Create Markdown files based on project name, project identifier and metadata, considering the task completion status."""
     tasks_grouped_by_project = defaultdict(list)
     for task in tasks_with_project_info:
         project_name, project_id = task[3], task[4]
         tasks_grouped_by_project[(project_name, project_id)].append(task)
 
-    # Group by filename to handle multiple projects with same name
-    files_by_name = defaultdict(list)
+    # Group by full file path (including folder) to handle multiple projects with same name
+    files_by_path = defaultdict(list)
     for (project_name, project_id), tasks in tasks_grouped_by_project.items():
-        project_info = project_metadata.get(project_id, (project_id, "Untitled", "N/A"))
+        project_info = project_metadata.get(project_id, (project_id, "Untitled", "N/A", None))
         project_status = project_info[2]
+        folder_id = project_info[3]
+
+        # Get folder path
+        folder_path = folder_hierarchy.get(folder_id, "") if folder_id else ""
 
         # Add status to filename unless it's 'active'
         status_suffix = f" ({project_status})" if project_status.lower() != 'active' else ""
         sanitized_name = sanitize_filename(f"{project_name if project_name else 'Inbox'}{status_suffix}")
-        files_by_name[sanitized_name].append((project_name, project_id, tasks, project_status))
 
-    os.makedirs(output_directory, exist_ok=True)
+        # Create full path with folder
+        if folder_path:
+            sanitized_folder_path = "/".join(sanitize_filename(part) for part in folder_path.split("/"))
+            full_path = f"{sanitized_folder_path}/{sanitized_name}"
+        else:
+            full_path = sanitized_name
 
-    for filename, project_groups in files_by_name.items():
-        file_path = os.path.join(output_directory, f"{filename}.md")
+        files_by_path[full_path].append((project_name, project_id, tasks, project_status))
 
-        # Combine all projects with the same filename
+    for full_path, project_groups in files_by_path.items():
+        file_path = os.path.join(output_directory, f"{full_path}.md")
+
+        # Create directory structure if needed
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        # Combine all projects with the same file path
         combined_content = ""
         for project_name, project_id, tasks, project_status in project_groups:
-            md_metadata = generate_md_metadata(project_metadata.get(project_id, (project_id, "Untitled", "N/A")))
+            md_metadata = generate_md_metadata(project_metadata.get(project_id, (project_id, "Untitled", "N/A", None)))
             project_content = "---\n" + md_metadata + "---\n" + generate_md_content_with_title(tasks, project_id, task_tags, project_status)
             combined_content += project_content + "\n\n"
 
@@ -243,4 +304,5 @@ output_directory = "omnifocus_md"
 tasks_with_project_info = fetch_tasks_with_project_info(database_path)
 project_metadata = fetch_projects_with_metadata_from_projectinfo(database_path)
 task_tags = fetch_task_tags(database_path)
-create_md_files(tasks_with_project_info, project_metadata, task_tags, output_directory)
+folder_hierarchy = fetch_folder_hierarchy(database_path)
+create_md_files(tasks_with_project_info, project_metadata, task_tags, folder_hierarchy, output_directory)
