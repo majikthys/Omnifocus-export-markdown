@@ -415,12 +415,29 @@ def create_md_files(tasks_with_project_info, project_metadata, task_tags, folder
         status_suffix = f" ({project_status})" if project_status.lower() != 'active' else ""
         sanitized_name = sanitize_filename(f"{project_name if project_name else 'Inbox'}{status_suffix}")
 
-        # Create full path with folder
+        # Create full path with folder and status subfolder
         if folder_path:
             sanitized_folder_path = "/".join(sanitize_filename(part) for part in folder_path.split("/"))
-            full_path = f"{sanitized_folder_path}/{sanitized_name}"
+
+            # Add status subfolder for non-active projects
+            if project_status.lower() != 'active':
+                if project_status.lower() == 'inactive':
+                    status_folder = f"({sanitize_filename(project_status.lower())})"
+                else:
+                    status_folder = f".({sanitize_filename(project_status.lower())})"
+                full_path = f"{sanitized_folder_path}/{status_folder}/{sanitized_name}"
+            else:
+                full_path = f"{sanitized_folder_path}/{sanitized_name}"
         else:
-            full_path = sanitized_name
+            # For projects without folders, use status subfolder at root level
+            if project_status.lower() != 'active':
+                if project_status.lower() == 'inactive':
+                    status_folder = f"({sanitize_filename(project_status.lower())})"
+                else:
+                    status_folder = f".({sanitize_filename(project_status.lower())})"
+                full_path = f"{status_folder}/{sanitized_name}"
+            else:
+                full_path = sanitized_name
 
         files_by_path[full_path].append((project_name, project_id, tasks, project_status))
 
@@ -447,6 +464,79 @@ def create_md_files(tasks_with_project_info, project_metadata, task_tags, folder
 
         with open(file_path, 'w') as md_file:
             md_file.write(combined_content.strip())
+
+def reorganize_empty_folders(output_directory):
+    """Reorganize empty folders or folders containing only dot folders into sibling dot folders."""
+    import shutil
+
+    # Walk through all directories
+    for root, dirs, files in os.walk(output_directory, topdown=False):
+        # Skip if this is the root output directory
+        if root == output_directory:
+            continue
+
+        # Get relative path from output directory
+        rel_path = os.path.relpath(root, output_directory)
+        path_parts = rel_path.split(os.sep)
+
+        # Skip if this is already a dot folder
+        if any(part.startswith('.') for part in path_parts):
+            continue
+
+        # Check folder contents
+        has_regular_files = len(files) > 0
+        has_regular_dirs = any(not d.startswith('.') and not d.startswith('(') for d in dirs)
+        has_dot_dirs = any(d.startswith('.') for d in dirs)
+        has_dropped_dirs = any('.(dropped)' in d for d in dirs)
+
+        # Determine if folder should be moved
+        should_move = False
+        target_status = None
+
+        if not has_regular_files and not has_regular_dirs:
+            # Folder contains only dot folders or is empty
+            if has_dropped_dirs:
+                target_status = "dropped"
+                should_move = True
+            elif has_dot_dirs:
+                target_status = "done"
+                should_move = True
+            elif len(dirs) == 0:  # Completely empty
+                target_status = "done"
+                should_move = True
+
+        if should_move:
+            # Determine parent directory and create target path
+            parent_dir = os.path.dirname(root)
+            folder_name = os.path.basename(root)
+            target_dir = os.path.join(parent_dir, f".({target_status})")
+            target_path = os.path.join(target_dir, folder_name)
+
+            # Create target directory if it doesn't exist
+            os.makedirs(target_dir, exist_ok=True)
+
+            # Move the folder
+            if os.path.exists(target_path):
+                # If target exists, merge contents
+                for item in os.listdir(root):
+                    src = os.path.join(root, item)
+                    dst = os.path.join(target_path, item)
+                    if os.path.isdir(src):
+                        if os.path.exists(dst):
+                            # Merge directories recursively
+                            shutil.copytree(src, dst, dirs_exist_ok=True)
+                            shutil.rmtree(src)
+                        else:
+                            shutil.move(src, dst)
+                    else:
+                        shutil.move(src, dst)
+                # Remove empty source directory
+                os.rmdir(root)
+            else:
+                # Move entire folder
+                shutil.move(root, target_path)
+
+            print(f"Moved empty folder '{rel_path}' to '.({target_status})/{folder_name}'")
 
 def main():
     # Parse command line arguments
@@ -479,6 +569,9 @@ def main():
     task_attachments = fetch_task_attachments(database_path)
     task_attachment_refs = save_attachment_previews(task_attachments, output_directory, backup_dir)
     create_md_files(tasks_with_project_info, project_metadata, task_tags, folder_hierarchy, task_attachment_refs, output_directory)
+
+    # Reorganize empty folders after file creation
+    reorganize_empty_folders(output_directory)
 
 if __name__ == "__main__":
     main()
